@@ -1,24 +1,26 @@
 path:
   train_data_path: data/train_odps.txt
   valid_data_path: data/test_odps.txt
-  word_emb_raw_path: data/vocab/sgns.baidubaike.bigram-char
-  word_emb_path: data/vocab/word_embed.pickle
-  vocab_path: data/vocab/vocab.pickle
+  vocab_path: vocab/train_kbs_zhidao_word.txt
+  word_embed_path: vocab/zhidao_skipgram_200.bin
   save_model_path: checkpoints/model.ckpt
 
 hparams: &DEFAULT
-  embed_size: 300
+  embed_size: 200
   max_len: 30
-  filter_sizes: [3, 4, 5]
-  num_filters: 100
-  learning_rate: 1.0e-3
-  decay_rate: 0.95
-  decay_steps: 1000
   batch_size_train: 32
   batch_size_eval: 1024
+  num_epoch: 200
+  earlystop_patience: 5
+  # 可调
+  filter_sizes: [3, 4, 5]
+  num_filters: 100
+  learning_rate: 1.0e-4
+  decay_rate: 1.0
+  decay_steps: 1000
   grad_max: 6
-  dropout_rate: 0.0
+  dropout_rate: 0.3
+  l2_constrain: 3
   scale_l2: 0
   label_smoothing: 0
-  num_epoch: 50
-  earlystop_patience: 5
+

@@ -1,27 +1,27 @@
 #!/usr/bin/python3
 # -*- coding: utf-8 -*-
 '''
-    Author: Yi Zhang
-    Date created: 2019/06/04
+	Author: Yi Zhang
+	Date created: 2019/06/04
 '''
 import sys
 import copy
 
 import tensorflow as tf
 
-from utils import load_config, load_hparams
+from utils import load_config
 from logger import create_logger
 
 
 class TextCNN(object):
 	def __init__(self, hparams, num_classes, logger):
 		# hparams
-		self._hp = copy.deepcopy(hparams)
+		self.hp = copy.deepcopy(hparams)
 		self._num_classes = num_classes
-		self._logger = logger
+		self.logger = logger
 		# placeholder
-		self.embed_sent = tf.placeholder(dtype=tf.float32, shape=[None, self._hp.max_len, self._hp.embed_size],
-										  name='embed_sents')
+		self.embed_sent = tf.placeholder(dtype=tf.float32, shape=[None, self.hp.max_len, self.hp.embed_size],
+										 name='embed_sent')
 		self.onehot_label = tf.placeholder(dtype=tf.int32, shape=[None, num_classes], name='Onehot_label')
 		self.training = tf.placeholder(dtype=tf.bool, shape=None, name='training')
 		
@@ -30,26 +30,26 @@ class TextCNN(object):
 		with tf.variable_scope('TextCNN'):
 			with tf.variable_scope('CNN'):
 				self.features = cnn(input_tensor=self.embed_sent,
-									num_filters=self._hp.num_filters,
-									filter_sizes=self._hp.filter_sizes,
+									num_filters=self.hp.num_filters,
+									filter_sizes=self.hp.filter_sizes,
 									initializer=self._initializer)
 			with tf.variable_scope('FC'):
 				self._logits = fully_connected_layer(input_tensor=self.features,
 													units=num_classes,
-													dropout_rate=self._hp.dropout_rate,
+													dropout_rate=self.hp.dropout_rate,
 													training=self.training,
 													initializer=self._initializer)
 		# calculate loss, pred, prob, correct, acc based on logits
 		self._tvars = tf.trainable_variables()
 		with tf.name_scope('loss'):
-			self._loss = self._calc_loss()
+			self.loss = self._calc_loss()
 		with tf.name_scope('probability'):
 			self._prob = tf.nn.softmax(self._logits, axis=1, name='Prob')
 		with tf.name_scope('prediction'):
-			self._pred = tf.argmax(self._logits, axis=1, output_type=tf.int32, name='Pred')
+			self.pred = tf.argmax(self._logits, axis=1, output_type=tf.int32, name='Pred')
 		with tf.name_scope('is_correct'):
 			self._label = tf.argmax(self.onehot_label, axis=1, output_type=tf.int32, name='Label')
-			self._correct = tf.equal(self._pred, self._label, name='Correct')
+			self.correct = tf.equal(self.pred, self._label, name='Correct')
 		
 		self.train = self._train_op()
 		self.print = self._print_op()
@@ -59,21 +59,25 @@ class TextCNN(object):
 	# todo: 改成SPL
 	def _calc_loss(self):
 		loss = tf.losses.softmax_cross_entropy(onehot_labels=self.onehot_label, logits=self._logits,
-		                                             label_smoothing=self._hp.label_smoothing)
-		if self._hp.scale_l2:
+													 label_smoothing=self.hp.label_smoothing)
+		if self.hp.scale_l2:
 			loss_l2 = tf.add_n([tf.nn.l2_loss(v) for v in self._tvars if 'bias' not in v.name])
-			loss = loss + self._hp.scale_l2 * loss_l2
+			loss = loss + self.hp.scale_l2 * loss_l2
 		return loss
 
 	def _train_op(self):
-		self._global_step = tf.train.create_global_step()
-		self.optimizer = tf.train.AdamOptimizer(learning_rate=self._hp.learning_rate)
-		gvs = self.optimizer.compute_gradients(self._loss)
+		self.global_step = tf.train.create_global_step()
+		self.learning_rate = tf.train.exponential_decay(learning_rate=self.hp.learning_rate,
+                                                        global_step=self.global_step,
+                                                        decay_steps=self.hp.decay_steps,
+                                                        decay_rate=self.hp.decay_rate)
+		self.optimizer = tf.train.AdamOptimizer(learning_rate=self.hp.learning_rate)
+		gvs = self.optimizer.compute_gradients(self.loss)
 		g, v = zip(*gvs)
-		if self._hp.grad_max:
-			g, _ = tf.clip_by_global_norm(g, self._hp.grad_max)
+		if self.hp.grad_max:
+			g, _ = tf.clip_by_global_norm(g, self.hp.grad_max)
 		clipped_gvs = zip(g, v)
-		return self.optimizer.apply_gradients(clipped_gvs, global_step=self._global_step)
+		return self.optimizer.apply_gradients(clipped_gvs, global_step=self.global_step)
 
 	def _print_op(self):
 		# for debug
@@ -82,34 +86,15 @@ class TextCNN(object):
 		return print_op
 
 	def _print_hparams(self):
-		self._logger.info('hyperparameters:')
-		for k, v in self._hp.values().items():
-			self._logger.info('\t%s: %s', k, v)
+		self.logger.info('hyperparameters:')
+		for k, v in self.hp.values().items():
+			self.logger.info('\t%s: %s', k, v)
 
 	def _print_tvars(self):
-		self._logger.info('trainable variables:')
+		self.logger.info('trainable variables:')
 		for v in self._tvars:
-			self._logger.info('\t%s', v)
-	
-	@property
-	def hp(self):
-		return self._hp
-	
-	@property
-	def loss(self):
-		return self._loss
-	
-	@property
-	def pred(self):
-		return self._pred
+			self.logger.info('\t%s', v)
 
-	@property
-	def correct(self):
-		return self._correct
-	
-	@property
-	def global_step(self):
-		return self._global_step
 
 
 def cnn(input_tensor, num_filters, filter_sizes, initializer):
@@ -156,6 +141,6 @@ def fully_connected_layer(input_tensor, units, dropout_rate, training, initializ
 if __name__ == '__main__':
 	cfg_file = 'config.yaml'
 	files_path = load_config(cfg_file, section='path')
-	hparams = load_hparams(cfg_file, section='hparams')
+	hparams = load_config(cfg_file, section='hparams')
 	logger = create_logger('TextCNN')
 	model = TextCNN(hparams=hparams, num_classes=9, logger=logger)
