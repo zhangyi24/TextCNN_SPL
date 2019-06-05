@@ -22,7 +22,7 @@ tf.flags.DEFINE_boolean('debug', default=False, help='use tfdbg for debugging')
 def evaluate(sess, model, dataset, vocab, embed):
 	batch_size = model.hp.batch_size_eval
 	num_batch = (len(dataset) - 1) // batch_size + 1
-	num_samples, loss_total, correct_total = 0, 0, 0
+	num_samples, loss_total, corrects_total = 0, 0, 0
 	for id_batch in range(num_batch):
 		batch_data = dataset.next_batch(batch_size)
 		len_batch_data = len(batch_data)
@@ -32,20 +32,21 @@ def evaluate(sess, model, dataset, vocab, embed):
 								 embed=embed,
 								 num_classes = dataset.num_classes)
 		feed_dict = feed_data(model, *batch_data, training=False)
-		loss_batch, correct_batch = sess.run(fetches=(model.loss, model.correct), feed_dict=feed_dict)
+		loss_batch, corrects_batch = sess.run(fetches=(model.loss, model.corrects), feed_dict=feed_dict)
 		num_samples += len_batch_data
 		loss_total += loss_batch * len_batch_data
-		correct_total += np.sum(correct_batch)
+		corrects_total += np.sum(corrects_batch)
 	loss = loss_total / num_samples
-	acc = correct_total / num_samples
+	acc = corrects_total / num_samples
 	return loss, acc
 
 
-def train_epoch(sess, model, trainset, vocab, embed, id_epoch):
+def train_epoch(sess, model, trainset, vocab, embed, epoch_id, hparams):
+	model.logger.info(model.top_k)
 	batch_size = model.hp.batch_size_train
 	num_batch = (len(trainset) - 1) // batch_size + 1
-	num_samples, loss_total, correct_total = 0, 0, 0
-	for id_batch in range(num_batch):
+	num_samples, loss_total, corrects_total = 0, 0, 0
+	for batch_id in range(num_batch):
 		batch_data = trainset.next_batch(batch_size)
 		len_batch_data = len(batch_data)
 		batch_data = data_to_num(batch_data=batch_data,
@@ -54,45 +55,55 @@ def train_epoch(sess, model, trainset, vocab, embed, id_epoch):
 								 embed=embed,
 								 num_classes=trainset.num_classes)
 		feed_dict = feed_data(model, *batch_data, training=True)
-		if FLAGS.debug:
-			loss_batch, correct_batch, learning_rate, global_step, _, _ = sess.run(
-				fetches=(model.loss, model.correct, model.learning_rate, model.global_step, model.train, model.print), feed_dict=feed_dict)
-		else:
-			loss_batch, correct_batch, learning_rate, global_step, _ = sess.run(
-				fetches=(model.loss, model.correct, model.learning_rate, model.global_step, model.train), feed_dict=feed_dict)
+		loss_batch, corrects_batch, top_k, learning_rate, global_step, _ = sess.run(
+			fetches=(model.loss, model.corrects, model.top_k, model.learning_rate, model.global_step, model.train), feed_dict=feed_dict)
 		num_samples += len_batch_data
 		loss_total += loss_batch * len_batch_data
-		correct_total += np.sum(correct_batch)
-		if (id_batch + 1) % 20 == 0:
+		corrects_total += np.sum(corrects_batch)
+		if (batch_id + 1) % 20 == 0:
 			loss_train = loss_total / num_samples
-			acc_train = correct_total / num_samples
-			model.logger.info('Epoch: %d\tbatch: %d\tloss_train: %.4f\tacc_train: %.4f\tlr: %.4e\tstep: %d',
-				id_epoch + 1, id_batch+1, loss_train, acc_train, learning_rate, global_step)
-			num_samples, loss_total, correct_total = 0, 0, 0
+			acc_train = corrects_total / num_samples
+			model.logger.info('Epoch: %d\tbatch: %d\tloss_train: %.4f\tacc_train: %.4f\ttop_k: %d\tlr: %.4e\tstep: %d',
+				epoch_id + 1, batch_id + 1, loss_train, acc_train, top_k, learning_rate, global_step)
+			num_samples, loss_total, corrects_total = 0, 0, 0
 
 
 def main(_):
 	cfg_file = 'config.yaml'
-	hparams = load_config(cfg_file, section='hparams')		# hparams
-	logger = create_logger('textcnn')		# logger
 
-	# prepare dataset, vocab, embed
+	# hparams
+	hparams = load_config(cfg_file, section='hparams')
+
+	# logger
+	logger = create_logger('textcnn')
+
+	# prepare datasets
 	files_path = load_config(cfg_file, section='path')
 	trainset = Dataset(files_path['train_data_path'], logger)
 	num_classes = trainset.num_classes
-	validset = Dataset(files_path['train_data_path'], logger, label_table=trainset.label_table)
+	validset = Dataset(files_path['valid_data_path'], logger, dict_class_to_label=trainset.dict_class_to_label)
+	logger.info('dict_class_to_label: %s', trainset.dict_class_to_label)
+	logger.info('trainset label_stat: %s', trainset.label_stat)
+	logger.info('validset label_stat: %s', validset.label_stat)
+
+	# load vocab, embed
 	vocab = load_vocab(files_path['vocab_path'])
 	word_embed = load_embed(files_path['word_embed_path'])
+	hparams.add_hparam('vocab_size', word_embed.shape[0])
+	hparams.add_hparam('embed_size', word_embed.shape[1])
 
+	# load model
 	logger.info('loading model...')
 	graph = tf.Graph()
 	with graph.as_default():
 		model = TextCNN(hparams=hparams, num_classes=num_classes, logger=logger)
 
+	# train model
 	with tf.Session(graph=graph) as sess:
 		# debug
 		if FLAGS.debug:
 			sess = tf_debug.LocalCLIDebugWrapperSession(sess, dump_root='tfdbg')
+
 		# init model
 		sess.run(tf.global_variables_initializer())
 		logger.info('params initialized')
@@ -107,10 +118,11 @@ def main(_):
 		logger.info('loss_valid: %.4f\tacc: %.4f', loss_valid, acc)
 		best_result = {'loss_valid': loss_valid, 'acc': acc}
 		patience = 0
-		# train
+
+		# train model
 		for id_epoch in range(hparams.num_epoch):
-			train_epoch(sess, model, trainset, vocab, word_embed, id_epoch)
-			loss_valid, acc = evaluate(sess, model, validset, vocab, word_embed)
+			train_epoch(sess, model, trainset, vocab, word_embed, id_epoch, hparams)		# train epoch
+			loss_valid, acc = evaluate(sess, model, validset, vocab, word_embed)		# evaluate
 			logger.info('Epoch: %d\tloss_valid: %.4f\tacc: %.4f', id_epoch + 1, loss_valid, acc)
 			if loss_valid < best_result['loss_valid']:		# save model
 				saver.save(sess=sess, save_path=save_path)

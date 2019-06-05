@@ -19,26 +19,28 @@ UNK = '<UNK>'
 PAD = '<PAD>'
 
 class Dataset(object):
-    def __init__(self, data_path, logger, label_table=None):
+    def __init__(self, data_path, logger, dict_class_to_label=None):
         self._data_path = data_path
         self._logger = logger
         self.data, self.classes_stat = read_data(self._data_path)
         self._data_size = len(self.data)
         self.num_classes = len(self.classes_stat)
-        if label_table:
-            self.label_table = label_table
-        else:
-            self.label_table = self.create_label_table()    # map class_id to label
-        self._class_to_label()  # get label from class_id, label range from [0, 1, ..., num_classes - 1]
+        self.dict_class_to_label = dict_class_to_label
+        self.dict_class_to_label, self.dict_label_to_class = self.link_label_and_class()
+        self._generate_label()  # get label from class_id, label range from [0, 1, ..., num_classes - 1]
+        self.label_stat = self._get_label_stat()
         self.len_stat = self._get_sents_len_stat()  # statistic of length of sentences
         self._next_batch_start = 0
 
-    def create_label_table(self):
-        labels = list(self.classes_stat.keys())
-        labels.sort()
-        label_table = dict(zip(labels, range(len(labels))))
-        self._logger.info('label_table:%s', label_table)
-        return label_table
+    def link_label_and_class(self):
+        if self.dict_class_to_label:
+            dict_class_to_label = self.dict_class_to_label
+        else:
+            labels = list(self.classes_stat.keys())
+            labels.sort()
+            dict_class_to_label = dict(zip(labels, range(len(labels))))
+        dict_label_to_class = dict(zip(dict_class_to_label.values(), dict_class_to_label.keys()))
+        return dict_class_to_label, dict_label_to_class
 
     def next_batch(self, batch_size=None):
         if batch_size:
@@ -55,14 +57,20 @@ class Dataset(object):
         else:
             return self.data
 
-
-    def _class_to_label(self):
+    def _generate_label(self):
         for datum in self.data:
             try:
-                label = self.label_table[datum['class_id']]
+                label = self.dict_class_to_label[datum['class_id']]
                 datum.update({'label': label})
             except KeyError:
-                self._logger.info('KeyError: class_id: %s is not in label_table: %s', datum['class_id'], self.label_table)
+                self._logger.info('KeyError: class_id: %s is not in dict_class_to_label: %s', datum['class_id'], self.dict_class_to_label)
+
+    def _get_label_stat(self):
+        label_stat = {}
+        for class_id, num in self.classes_stat.items():
+            label = self.dict_class_to_label[class_id]
+            label_stat.update({label: num})
+        return label_stat
 
     def _get_sents_len_stat(self):
         len_stat = {}
@@ -85,17 +93,18 @@ def read_data(data_path):
     classes_stat = {}
     with open(data_path, 'r', encoding='utf-8') as f:
         lines = f.readlines()
-        for line in lines:
+        for data_id, line in enumerate(lines):
             datum = line.split(',')
             sent = datum[1]
             words = jieba.lcut(sent)
             class_id = int(datum[5])
-            dataset.append({'sent': sent, 'words': words, 'class_id': class_id})
+            dataset.append({'sent': sent, 'words': words, 'class_id': class_id, 'data_id': data_id})
             if class_id in classes_stat:
                 classes_stat[class_id] += 1
             else:
                 classes_stat[class_id] = 1
     return dataset, classes_stat
+
 
 def sent_to_words_id(batch_sent, max_len, vocab):
     batch_size = len(batch_sent)
@@ -108,6 +117,7 @@ def sent_to_words_id(batch_sent, max_len, vocab):
         batch_words_id[sent_id, len_sent: max_len] = vocab[PAD]
     return batch_words_id
 
+
 def data_to_num(batch_data, max_len, vocab, embed, num_classes):
     batch_sent = [datum['words'] for datum in batch_data]
     batch_words_id = sent_to_words_id(batch_sent, max_len, vocab)
@@ -117,13 +127,16 @@ def data_to_num(batch_data, max_len, vocab, embed, num_classes):
     onehot_label = np.eye(num_classes, dtype=np.int32)[label]
     return embed_sent, onehot_label
 
-def feed_data(model, embed_sent, onehot_label, training):
+
+def feed_data(model, embed_sents, onehot_labels, training):
 	feed_dict = {
-		model.embed_sent: embed_sent,
-		model.onehot_label: onehot_label,
+		model.embed_sents: embed_sents,
+		model.onehot_labels: onehot_labels,
+        model.batch_data_len: len(onehot_labels),
 		model.training: training
 	}
 	return feed_dict
+
 
 def load_vocab(file):
     with open(file, 'r', encoding='utf-8') as f:
